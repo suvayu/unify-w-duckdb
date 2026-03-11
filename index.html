@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>DuckDB Viewer</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      margin: 20px;
+    }
+    .file-input-wrapper {
+      display: inline-flex;
+      align-items: center;
+      border: 1px solid #ccc;
+      padding: 5px;
+      cursor: pointer;
+      background: white;
+    }
+    .file-input-wrapper:hover {
+      border-color: #999;
+    }
+    #filePathDisplay {
+      width: 350px;
+      border: none;
+      outline: none;
+      background: transparent;
+      cursor: pointer;
+      color: #666;
+    }
+    #filePathDisplay.has-file {
+      color: black;
+    }
+    button {
+      margin-left: 5px;
+      cursor: pointer;
+    }
+    #fileInput {
+      display: none;
+    }
+    .filter-section {
+      margin-top: 15px;
+    }
+    #whereClause {
+      width: 400px;
+      padding: 5px;
+      font-family: monospace;
+    }
+    .main-container {
+      display: flex;
+      gap: 20px;
+      margin-top: 20px;
+    }
+    .summary-panel {
+      flex: 0 0 350px;
+      border: 1px solid #ccc;
+      padding: 10px;
+      max-height: 80vh;
+      overflow-y: auto;
+    }
+    .summary-panel h3 {
+      margin-top: 0;
+      border-bottom: 1px solid #ccc;
+      padding-bottom: 5px;
+    }
+    .summary-stats {
+      font-size: 0.9em;
+    }
+    .summary-stats h4 {
+      margin: 10px 0 5px 0;
+      color: #333;
+    }
+    .summary-stats table {
+      width: 100%;
+      font-size: 0.85em;
+      margin-bottom: 15px;
+    }
+    .summary-stats td {
+      padding: 2px 5px;
+    }
+    .summary-stats td:first-child {
+      font-weight: bold;
+      color: #666;
+    }
+    .data-panel {
+      flex: 1;
+      overflow-x: auto;
+    }
+    #dataTable {
+      border-collapse: collapse;
+      width: 100%;
+    }
+    #dataTable th, #dataTable td {
+      padding: 5px 10px;
+      text-align: left;
+    }
+    #dataTable th {
+      background-color: #f0f0f0;
+    }
+    .row-count {
+      font-size: 1.1em;
+      font-weight: bold;
+      margin-bottom: 15px;
+      color: #333;
+    }
+  </style>
+</head>
+<body>
+  <h1>DuckDB Viewer</h1>
+  
+  <div class="file-input-wrapper" onclick="document.getElementById('fileInput').click()">
+    <input type="text" id="filePathDisplay" placeholder="Click to select a CSV or Parquet file" readonly>
+    <button onclick="event.stopPropagation(); loadFile()">Load</button>
+  </div>
+  
+  <input type="file" id="fileInput" accept=".csv,.parquet">
+  
+  <div class="filter-section">
+    <label>WHERE clause: </label>
+    <input type="text" id="whereClause" placeholder="e.g., age > 25 AND city = 'New York'" onkeypress="if(event.key === 'Enter') refreshData()">
+    <button onclick="refreshData()">Apply Filter</button>
+    <button onclick="clearFilter()">Clear</button>
+  </div>
+  
+  <div id="status" style="margin: 10px 0; color: #666;"></div>
+  
+  <div class="main-container">
+    <div class="summary-panel">
+      <h3>File Summary</h3>
+      <div id="summaryContent">
+        <p style="color: #666;">Load a file to see summary statistics</p>
+      </div>
+    </div>
+    
+    <div class="data-panel">
+      <table id="dataTable" border="1">
+        <thead id="tableHead"></thead>
+        <tbody id="tableBody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <script>
+    const fileInput = document.getElementById('fileInput');
+    const filePathDisplay = document.getElementById('filePathDisplay');
+    const whereClauseInput = document.getElementById('whereClause');
+    let selectedFile = null;
+    
+    fileInput.addEventListener('change', async (e) => {
+      if (e.target.files.length > 0) {
+        selectedFile = e.target.files[0];
+        filePathDisplay.value = selectedFile.name;
+        filePathDisplay.classList.add('has-file');
+        // Auto-load when file is selected
+        await loadFile();
+      }
+    });
+    
+    async function loadFile() {
+      const status = document.getElementById('status');
+      
+      if (!selectedFile) {
+        status.textContent = 'Please select a file first';
+        return;
+      }
+      
+      status.textContent = 'Loading...';
+      
+      try {
+        const formData = new FormData();
+        formData.append('file', selectedFile);
+        
+        const response = await fetch('/api/upload', {
+          method: 'POST',
+          body: formData
+        });
+        
+        const result = await response.json();
+        
+        if (result.success) {
+          status.textContent = 'File loaded successfully';
+          await Promise.all([refreshData(), refreshSummary()]);
+        } else {
+          status.textContent = 'Error: ' + result.error;
+        }
+      } catch (error) {
+        status.textContent = 'Error: ' + error.message;
+      }
+    }
+    
+    function clearFilter() {
+      whereClauseInput.value = '';
+      refreshData();
+    }
+    
+    function formatNumber(num) {
+      if (num === null || num === undefined) return 'N/A';
+      if (typeof num === 'number') {
+        return Number.isInteger(num) ? num.toString() : num.toFixed(2);
+      }
+      return num;
+    }
+    
+    async function refreshSummary() {
+      const summaryContent = document.getElementById('summaryContent');
+      
+      try {
+        const response = await fetch('/api/summary');
+        const summary = await response.json();
+        
+        if (summary.error) {
+          summaryContent.innerHTML = `<p style="color: red;">Error: ${summary.error}</p>`;
+          return;
+        }
+        
+        let html = `<div class="row-count">Total Rows: ${summary.rowCount.toLocaleString()}</div>`;
+        html += '<div class="summary-stats">';
+        
+        for (const col of summary.columns) {
+          html += `<h4>${col.name} <small style="color: #666;">(${col.type})</small></h4>`;
+          html += '<table border="0">';
+          
+          // Common stats
+          html += `<tr><td>Nulls:</td><td>${col.nullCount}</td></tr>`;
+          
+          // Type-specific stats
+          if (col.min !== undefined) {
+            html += `<tr><td>Min:</td><td>${formatNumber(col.min)}</td></tr>`;
+            html += `<tr><td>Max:</td><td>${formatNumber(col.max)}</td></tr>`;
+            html += `<tr><td>Median:</td><td>${formatNumber(col.median)}</td></tr>`;
+          }
+          
+          if (col.mean !== undefined) {
+            html += `<tr><td>Mean:</td><td>${formatNumber(col.mean)}</td></tr>`;
+            html += `<tr><td>Std Dev:</td><td>${formatNumber(col.stddev)}</td></tr>`;
+          }
+          
+          if (col.uniqueCount !== undefined) {
+            html += `<tr><td>Unique:</td><td>${col.uniqueCount.toLocaleString()}</td></tr>`;
+            html += `<tr><td>Min Len:</td><td>${col.minLength}</td></tr>`;
+            html += `<tr><td>Max Len:</td><td>${col.maxLength}</td></tr>`;
+          }
+          
+          html += '</table>';
+        }
+        
+        html += '</div>';
+        summaryContent.innerHTML = html;
+      } catch (error) {
+        summaryContent.innerHTML = `<p style="color: red;">Error loading summary: ${error.message}</p>`;
+      }
+    }
+    
+    async function refreshData() {
+      const status = document.getElementById('status');
+      const whereClause = whereClauseInput.value.trim();
+      
+      try {
+        const url = new URL('/api/data', window.location.origin);
+        if (whereClause) {
+          url.searchParams.append('where', whereClause);
+        }
+        
+        const response = await fetch(url);
+        const data = await response.json();
+        
+        if (data.error) {
+          status.textContent = 'Error: ' + data.error;
+          return;
+        }
+        
+        // Render headers
+        const thead = document.getElementById('tableHead');
+        thead.innerHTML = '<tr>' + data.columns.map(col => `<th>${col}</th>`).join('') + '</tr>';
+        
+        // Render rows
+        const tbody = document.getElementById('tableBody');
+        tbody.innerHTML = data.rows.map(row => 
+          '<tr>' + row.map(cell => `<td>${cell}</td>`).join('') + '</tr>'
+        ).join('');
+        
+        const filterInfo = whereClause ? ` (filtered by: WHERE ${whereClause})` : '';
+        status.textContent = `Showing ${data.rows.length} rows${filterInfo}`;
+      } catch (error) {
+        status.textContent = 'Error fetching data: ' + error.message;
+      }
+    }
+  </script>
+</body>
+</html>
